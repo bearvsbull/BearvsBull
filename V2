@@ -1,0 +1,157 @@
+npx create-next-app@latest bear-vs-bull
+cd bear-vs-bull
+npm install tailwindcss @solana/web3.js @project-serum/anchor @solana/wallet-adapter-react @solana/wallet-adapter-react-ui @solana/wallet-adapter-wallets axios
+npx tailwindcss init -p
+module.exports = {
+  content: ["./pages/**/*.{js,ts,jsx,tsx}", "./components/**/*.{js,ts,jsx,tsx}"],
+  theme: { extend: {} },
+  plugins: [],
+};
+import { useState, useEffect } from "react";
+import { useWallet } from "@solana/wallet-adapter-react";
+import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import axios from "axios";
+
+export default function Home() {
+  const { publicKey } = useWallet();
+  const [bets, setBets] = useState([]);
+  const [betData, setBetData] = useState({ coin: "", amount: "", threshold: "", duration: "" });
+
+  useEffect(() => {
+    async function fetchBets() {
+      const res = await axios.get("/api/bets");
+      setBets(res.data);
+    }
+    fetchBets();
+  }, []);
+
+  const placeBet = async () => {
+    if (!publicKey) return alert("Connect Wallet");
+    await axios.post("/api/bets", { ...betData, wallet: publicKey.toString() });
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-6">
+      <div className="flex justify-between items-center">
+        <h1 className="text-3xl font-bold">Bear vs Bull</h1>
+        <WalletMultiButton />
+      </div>
+
+      <div className="mt-6">
+        <h2 className="text-xl">Place a Bet</h2>
+        <input type="text" placeholder="Coin Name" className="input" onChange={(e) => setBetData({ ...betData, coin: e.target.value })} />
+        <input type="number" placeholder="Amount (SOL)" className="input" onChange={(e) => setBetData({ ...betData, amount: e.target.value })} />
+        <input type="number" placeholder="Threshold %" className="input" onChange={(e) => setBetData({ ...betData, threshold: e.target.value })} />
+        <input type="number" placeholder="Duration (mins)" className="input" onChange={(e) => setBetData({ ...betData, duration: e.target.value })} />
+        <button onClick={placeBet} className="btn">Place Bet</button>
+      </div>
+
+      <div className="mt-6">
+        <h2 className="text-xl">Active Bets</h2>
+        {bets.map((bet, index) => (
+          <div key={index} className="p-4 bg-gray-800 rounded-lg mt-2">
+            {bet.coin} - {bet.amount} SOL - {bet.threshold}% - {bet.duration} mins
+            <button onClick={() => axios.post(`/api/match-bet/${bet._id}`, { wallet: publicKey.toString() })} className="btn">Match Bet</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+npm install express cors mongoose dotenv axios @solana/web3.js
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const mongoose = require("mongoose");
+const { Connection, clusterApiUrl, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL } = require("@solana/web3.js");
+
+const app = express();
+app.use(express.json());
+app.use(cors());
+
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+
+const BetSchema = new mongoose.Schema({
+  coin: String,
+  amount: Number,
+  threshold: Number,
+  duration: Number,
+  creator: String,
+  matcher: String,
+  status: { type: String, default: "pending" },
+});
+
+const Bet = mongoose.model("Bet", BetSchema);
+
+app.post("/api/bets", async (req, res) => {
+  const bet = new Bet(req.body);
+  await bet.save();
+  res.json(bet);
+});
+
+app.get("/api/bets", async (req, res) => {
+  const bets = await Bet.find({ status: "pending" });
+  res.json(bets);
+});
+
+app.post("/api/match-bet/:id", async (req, res) => {
+  const bet = await Bet.findById(req.params.id);
+  if (bet.status !== "pending") return res.status(400).json({ error: "Already matched" });
+
+  bet.matcher = req.body.wallet;
+  bet.status = "active";
+  await bet.save();
+
+  res.json(bet);
+});
+
+// Solana transaction logic here (Escrow + payouts)
+
+app.listen(5000, () => console.log("Server running on port 5000"));
+use anchor_lang::prelude::*;
+
+declare_id!("D8qXDrLYApfA3p6GeCwg2ufzLxXYq1qFRMMWZmuEjSFw");
+
+#[program]
+mod bet_contract {
+    use super::*;
+
+    pub fn place_bet(ctx: Context<PlaceBet>, amount: u64, threshold: u8, duration: u64) -> ProgramResult {
+        let bet = &mut ctx.accounts.bet;
+        bet.amount = amount;
+        bet.threshold = threshold;
+        bet.duration = duration;
+        bet.creator = ctx.accounts.creator.key();
+        Ok(())
+    }
+
+    pub fn resolve_bet(ctx: Context<ResolveBet>, price_movement: i8) -> ProgramResult {
+        let bet = &mut ctx.accounts.bet;
+        if (price_movement.abs() >= bet.threshold as i8) {
+            **ctx.accounts.winner.try_borrow_mut_lamports()? += bet.amount;
+        } else {
+            **ctx.accounts.loser.try_borrow_mut_lamports()? += bet.amount;
+        }
+        bet.status = "resolved".to_string();
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct PlaceBet<'info> {
+    #[account(init, payer = creator, space = 8 + 64)]
+    pub bet: Account<'info, Bet>,
+    #[account(mut)]
+    pub creator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ResolveBet<'info> {
+    #[account(mut)]
+    pub bet: Account<'info, Bet>,
+    #[account(mut)]
+    pub winner: Signer<'info>,
+    #[account(mut)]
+    pub loser: Signer<'info>,
+}
